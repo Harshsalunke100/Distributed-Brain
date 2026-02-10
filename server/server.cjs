@@ -17,6 +17,42 @@ instrument(io, {
 });
 
 const workers = new Map();
+const activeJobs = new Map();
+
+function splitMatrixRows(matrixA, dimension, numChunks) {
+  const chunks = [];
+  const rowsPerChunk = Math.ceil(dimension / numChunks);
+
+  for (let i = 0; i < numChunks; i += 1) {
+    const startRow = i * rowsPerChunk;
+    const endRow = Math.min(startRow + rowsPerChunk, dimension);
+    if (startRow >= dimension) break;
+
+    const startIdx = startRow * dimension;
+    const endIdx = endRow * dimension;
+    const chunkData = matrixA.slice(startIdx, endIdx);
+
+    chunks.push({
+      chunkId: i,
+      startRow,
+      endRow,
+      rowCount: endRow - startRow,
+      data: chunkData,
+    });
+  }
+
+  return chunks;
+}
+
+function getIdleWorkersInRoom(roomId) {
+  const idle = [];
+  for (const [id, info] of workers) {
+    if (info.status === "idle" && info.roomId === roomId) {
+      idle.push(id);
+    }
+  }
+  return idle;
+}
 
 io.on("connection", (socket) => {
   console.log("Connection:", socket.id);
@@ -44,7 +80,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("request-matrix-job", (payload = {}) => {
-    const { task = "Unknown Task", roomId = "public" } = payload;
+    const {
+      task = "Unknown Task",
+      roomId = "public",
+      matrixA = [],
+      matrixB = [],
+      dimension = 0,
+    } = payload;
+
     console.log(`Job Request for Room [${roomId}]: "${task}"`);
 
     io.to("admins").emit("admin-activity", {
@@ -52,15 +95,9 @@ io.on("connection", (socket) => {
       msg: `User (${socket.id.slice(0, 4)}...) requested: ${task} in [${roomId}]`,
     });
 
-    let selectedWorker = null;
-    for (const [id, info] of workers) {
-      if (info.status === "idle" && info.roomId === roomId) {
-        selectedWorker = id;
-        break;
-      }
-    }
+    const idleWorkers = getIdleWorkersInRoom(roomId);
 
-    if (!selectedWorker) {
+    if (!idleWorkers.length) {
       socket.emit("job-status", {
         status: "Queued",
         msg: `No idle workers in Room: ${roomId}`,
@@ -72,21 +109,60 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const info = workers.get(selectedWorker);
-    info.status = "busy";
-    workers.set(selectedWorker, info);
-    broadcastNetworkStatus();
+    const safeDimension = Math.max(1, Number.parseInt(dimension, 10) || 0);
+    const chunks = splitMatrixRows(matrixA, safeDimension, idleWorkers.length);
+    const jobId = `job_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-    io.to("admins").emit("admin-activity", {
-      time: new Date().toLocaleTimeString(),
-      msg: `Assigned task to Worker (${selectedWorker.slice(0, 4)}...) in [${roomId}]`,
+    activeJobs.set(jobId, {
+      fromSocket: socket.id,
+      totalChunks: chunks.length,
+      receivedChunks: 0,
+      results: new Array(chunks.length),
+      startTime: Date.now(),
+      task,
     });
 
-    io.to(selectedWorker).emit("compute-task", { ...payload, from: socket.id });
-    socket.emit("job-status", { status: "Assigned", worker: selectedWorker });
+    chunks.forEach((chunk, index) => {
+      const workerId = idleWorkers[index];
+      const info = workers.get(workerId);
+      if (info) {
+        info.status = "busy";
+        workers.set(workerId, info);
+      }
+
+      io.to(workerId).emit("compute-task", {
+        jobId,
+        chunkId: chunk.chunkId,
+        task,
+        type: payload.type || "matrix",
+        matrixA: chunk.data,
+        matrixB,
+        dimension: safeDimension,
+        rowCount: chunk.rowCount,
+        roomId,
+        from: socket.id,
+      });
+    });
+
+    broadcastNetworkStatus();
+    io.to("admins").emit("admin-activity", {
+      time: new Date().toLocaleTimeString(),
+      msg: `Distributed "${task}" into ${chunks.length} chunks in [${roomId}]`,
+    });
+    socket.emit("job-status", {
+      status: "Assigned",
+      msg: `Distributed to ${chunks.length} worker nodes.`,
+    });
   });
 
-  socket.on("compute-result", ({ result, from } = {}) => {
+  socket.on("compute-result", ({ jobId, chunkId, result, computeTimeMs, from } = {}) => {
+    const job = activeJobs.get(jobId);
+
+    if (job) {
+      job.results[chunkId] = Array.isArray(result) ? result : [];
+      job.receivedChunks += 1;
+    }
+
     if (workers.has(socket.id)) {
       const info = workers.get(socket.id);
       info.status = "idle";
@@ -94,14 +170,27 @@ io.on("connection", (socket) => {
       broadcastNetworkStatus();
     }
 
-    if (from) {
-      io.to(from).emit("job-finished", result || []);
-    }
-
     io.to("admins").emit("admin-activity", {
       time: new Date().toLocaleTimeString(),
-      msg: `Job finished. Result sent to User (${String(from).slice(0, 4)}...)`,
+      msg: `Chunk ${Number(chunkId) + 1 || "?"} received (${computeTimeMs || "?"}ms)`,
     });
+
+    if (job && job.receivedChunks === job.totalChunks) {
+      const finalResult = job.results.flat();
+      io.to(job.fromSocket).emit("job-finished", finalResult);
+
+      io.to("admins").emit("admin-activity", {
+        time: new Date().toLocaleTimeString(),
+        msg: `Job finished: "${job.task}" in ${Date.now() - job.startTime}ms`,
+      });
+
+      activeJobs.delete(jobId);
+      return;
+    }
+
+    if (from && !jobId) {
+      io.to(from).emit("job-finished", Array.isArray(result) ? result : []);
+    }
   });
 });
 

@@ -31,7 +31,9 @@ function App() {
   const [requestMode, setRequestMode] = useState("ai");
   const [requestDimension, setRequestDimension] = useState("512");
   const [requestDisease, setRequestDisease] = useState("Alzheimers");
+  const [requestTargetType, setRequestTargetType] = useState("public");
   const [requestRoom, setRequestRoom] = useState("public");
+  const [requestPrivateCode, setRequestPrivateCode] = useState("");
   const [requestStatus, setRequestStatus] = useState("System idle. Ready to deploy.");
   const [resultPreview, setResultPreview] = useState("");
   const [lastSubmittedMode, setLastSubmittedMode] = useState("ai");
@@ -65,23 +67,12 @@ function App() {
     <h1 className="site-title">
       <span className="site-logo" aria-hidden="true">
         <svg viewBox="0 0 64 64" role="img" aria-hidden="true">
-          <circle cx="32" cy="32" r="6" />
-          <ellipse cx="32" cy="32" rx="22" ry="10" />
-          <ellipse cx="32" cy="32" rx="12" ry="22" />
-          <path d="M14 22c10 7 26 7 36 0" />
-          <path d="M14 42c10-7 26-7 36 0" />
-          <line x1="32" y1="26" x2="32" y2="8" />
-          <line x1="38" y1="30" x2="54" y2="18" />
-          <line x1="38" y1="34" x2="56" y2="38" />
-          <line x1="32" y1="38" x2="32" y2="56" />
-          <line x1="26" y1="34" x2="10" y2="46" />
-          <line x1="26" y1="30" x2="8" y2="26" />
-          <circle cx="32" cy="8" r="3" />
-          <circle cx="54" cy="18" r="3" />
-          <circle cx="56" cy="38" r="3" />
-          <circle cx="32" cy="56" r="3" />
-          <circle cx="10" cy="46" r="3" />
-          <circle cx="8" cy="26" r="3" />
+          <circle cx="32" cy="32" r="24" />
+          <path d="M32 8 C22 10 22 54 32 56" />
+          <path d="M32 8 C42 10 42 54 32 56" />
+          <path d="M8 32h48" />
+          <path d="M14 22 C23 28 41 28 50 22" />
+          <path d="M14 42 C23 36 41 36 50 42" />
         </svg>
       </span>
       <span className="site-title-text">Distributed Brain</span>
@@ -92,16 +83,17 @@ function App() {
     const startedAt = performance.now();
 
     const dimension = Math.max(2, Number(payload.dimension) || 64);
+    const rowCount = Math.max(1, Number(payload.rowCount) || dimension);
     const matrixA = Array.isArray(payload.matrixA) ? payload.matrixA : [];
     const matrixB = Array.isArray(payload.matrixB) ? payload.matrixB : [];
 
-    // Capped compute so browser worker remains responsive.
-    const outputLength = Math.min(dimension * dimension, 16384);
-    const inner = Math.min(dimension, 64);
+    // Generate full chunk result size for server aggregation.
+    const outputLength = rowCount * dimension;
+    const inner = Math.min(dimension, 24);
     const result = new Array(outputLength);
 
     for (let idx = 0; idx < outputLength; idx += 1) {
-      const row = Math.floor(idx / dimension);
+      const row = Math.floor(idx / dimension) % rowCount;
       const col = idx % dimension;
       let sum = 0;
       for (let k = 0; k < inner; k += 1) {
@@ -160,7 +152,13 @@ function App() {
       setTasksSolved((prev) => prev + 1);
       setBrainEarnings((prev) => Number((prev + 0.42).toFixed(2)));
 
-      socket.emit("compute-result", { result, from: payload.from });
+      socket.emit("compute-result", {
+        jobId: payload.jobId,
+        chunkId: payload.chunkId,
+        result,
+        computeTimeMs: computeMs,
+        from: payload.from,
+      });
       setTimeout(() => setBrainState("idle"), 300);
     });
 
@@ -182,7 +180,7 @@ function App() {
 
     socket.on("job-status", (msg = {}) => {
       if (msg.status === "Assigned") {
-        setRequestStatus(`Assigned to Worker: ${String(msg.worker || "").slice(0, 6)}...`);
+        setRequestStatus(msg.msg || `Assigned to Worker: ${String(msg.worker || "").slice(0, 6)}...`);
       } else {
         setRequestStatus(msg.msg || "Queued. Waiting for worker...");
       }
@@ -241,7 +239,15 @@ function App() {
       return;
     }
 
-    const roomId = requestRoom.trim() || "public";
+    const roomId =
+      requestTargetType === "private"
+        ? requestPrivateCode.trim()
+        : requestRoom.trim() || "public";
+
+    if (!roomId) {
+      setRequestStatus("Enter private room code to connect to a private donor.");
+      return;
+    }
     const dimension = Math.max(16, Number.parseInt(requestDimension, 10) || 512);
     const size = dimension * dimension;
 
@@ -284,11 +290,11 @@ function App() {
 
   const idleWorkers = networkWorkers.filter((w) => w.status === "idle").length;
 
-  const activeRooms = useMemo(() => {
+  const activePublicRooms = useMemo(() => {
     const roomCounts = new Map();
     networkWorkers.forEach((w) => {
       const room = w.roomId || "public";
-      if (w.status === "idle") {
+      if (w.status === "idle" && room === "public") {
         roomCounts.set(room, (roomCounts.get(room) || 0) + 1);
       }
     });
@@ -398,12 +404,43 @@ function App() {
           <p className="socket-state">{requestConnected ? "Connected" : "Disconnected"} to {SOCKET_URL}</p>
 
           <div className="room-scanner">
-            <p className="metric-label">Active Rooms</p>
+            <p className="metric-label">Active Public Rooms</p>
             <div className="room-badges">
-              {activeRooms.length === 0 ? <span className="network-status">No active workers.</span> : activeRooms.map(([name, count]) => (
+              {activePublicRooms.length === 0 ? <span className="network-status">No public workers.</span> : activePublicRooms.map(([name, count]) => (
                 <button key={name} type="button" className="room-badge" onClick={() => setRequestRoom(name)}>{name}: {count}</button>
               ))}
             </div>
+          </div>
+
+          <div className="room-config">
+            <label className="mini-label">Connect To</label>
+            <div className="radio-row">
+              <label>
+                <input
+                  type="radio"
+                  name="requestTargetType"
+                  checked={requestTargetType === "public"}
+                  onChange={() => setRequestTargetType("public")}
+                />
+                Public Donor
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="requestTargetType"
+                  checked={requestTargetType === "private"}
+                  onChange={() => setRequestTargetType("private")}
+                />
+                Private Donor (Code)
+              </label>
+            </div>
+            {requestTargetType === "private" ? (
+              <input
+                value={requestPrivateCode}
+                onChange={(e) => setRequestPrivateCode(e.target.value)}
+                placeholder="Enter secret room code"
+              />
+            ) : null}
           </div>
 
           <div className="mode-tabs">
@@ -427,8 +464,14 @@ function App() {
             </>
           )}
 
-          <label htmlFor="room">Target Room</label>
-          <input id="room" value={requestRoom} onChange={(e) => setRequestRoom(e.target.value)} placeholder="public" />
+          <label htmlFor="room">Target Public Room</label>
+          <input
+            id="room"
+            value={requestRoom}
+            onChange={(e) => setRequestRoom(e.target.value)}
+            placeholder="public"
+            disabled={requestTargetType === "private"}
+          />
 
           <button type="button" onClick={launchRequestTask}>Launch Task</button>
 

@@ -56,8 +56,8 @@ body {
 .site-logo svg {
   width: 100%;
   height: 100%;
-  stroke: #f8fafc;
-  stroke-width: 3.1;
+  stroke: #1e88c8;
+  stroke-width: 3.2;
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -539,6 +539,11 @@ button:hover {
   margin: 0;
   color: #b3c3e4;
   font-size: 0.92rem;
+}
+
+.requestor-card input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .request-status-box {

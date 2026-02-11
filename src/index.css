@@ -566,7 +566,7 @@ button:hover {
 .rewards-panel {
   width: min(1180px, 96vw);
   display: grid;
-  grid-template-columns: 1.2fr 1fr auto;
+  grid-template-columns: 1.2fr 1fr 1fr auto;
   align-items: center;
   gap: 1rem;
 }
@@ -582,6 +582,16 @@ button:hover {
 
 .earnings-wrap {
   text-align: center;
+}
+
+.session-wrap {
+  display: grid;
+  gap: 0.45rem;
+  align-content: start;
+}
+
+.session-wrap .socket-state {
+  font-size: 0.88rem;
 }
 
 .earnings-value {
@@ -695,6 +705,28 @@ button:hover {
   border-radius: 10px;
   background: rgba(5, 12, 30, 0.75);
   padding: 0.8rem;
+}
+
+.request-loading-row {
+  margin-top: 0.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #b9d2ff;
+  font-size: 0.9rem;
+}
+
+.request-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(140, 247, 255, 0.35);
+  border-top-color: #00f6ff;
+  border-radius: 50%;
+  animation: request-spin 0.8s linear infinite;
+}
+
+.request-loading-text {
+  line-height: 1;
 }
 
 .request-status {
@@ -917,5 +949,11 @@ button:hover {
   }
   100% {
     transform: translate3d(-46px, -46px, 0);
+  }
+}
+
+@keyframes request-spin {
+  to {
+    transform: rotate(360deg);
   }
 }

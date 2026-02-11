@@ -11,6 +11,7 @@ const SOCKET_OPTIONS = {
   transports: ["websocket", "polling"],
 };
 const SESSION_TOKEN_KEY = "distributed_brain_session_token";
+const METRIC_WINDOW_SIZE = 12;
 
 const buildGlobeMesh = (nodeCount = 520, maxEdges = 2600) => {
   const nodes = [];
@@ -86,8 +87,17 @@ function App() {
   const llmLoadingRef = useRef(null);
   const requestTimeoutRef = useRef(null);
   const authTokenRef = useRef("");
+  const metricSamplesRef = useRef([]);
 
   const [networkWorkers, setNetworkWorkers] = useState([]);
+  const [networkClients, setNetworkClients] = useState({
+    donors: 0,
+    idleDonors: 0,
+    busyDonors: 0,
+    requestors: 0,
+    admins: 0,
+    requestorsList: [],
+  });
 
   const [workerConnected, setWorkerConnected] = useState(false);
   const [workerId, setWorkerId] = useState("");
@@ -115,9 +125,12 @@ function App() {
   const [requestPrivateCode, setRequestPrivateCode] = useState("");
   const [requestStatus, setRequestStatus] = useState("LLM request panel is ready.");
   const [resultPreview, setResultPreview] = useState("");
+  const [requestLoading, setRequestLoading] = useState(false);
 
   const [adminConnected, setAdminConnected] = useState(false);
   const [adminLogs, setAdminLogs] = useState([]);
+  const [leaderboardRows, setLeaderboardRows] = useState([]);
+  const [leaderboardStatus, setLeaderboardStatus] = useState("Loading leaderboard...");
   const globeMesh = useMemo(() => buildGlobeMesh(), []);
 
   const workerRoomId = useMemo(() => {
@@ -206,6 +219,17 @@ function App() {
     }
   }, [authUser, page]);
 
+  useEffect(() => {
+    if (page !== "donator") return undefined;
+
+    loadLeaderboard();
+    const intervalId = setInterval(() => {
+      loadLeaderboard();
+    }, 15000);
+
+    return () => clearInterval(intervalId);
+  }, [page]);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     setAuthError("");
@@ -250,6 +274,22 @@ function App() {
       // Ignore logout transport errors and clear local session anyway.
     } finally {
       clearAuthSession();
+    }
+  };
+
+  const loadLeaderboard = async () => {
+    try {
+      const payload = await fetchApi("/api/leaderboard?limit=8", { timeoutMs: 7000 });
+      const rows = Array.isArray(payload?.leaderboard) ? payload.leaderboard : [];
+      setLeaderboardRows(rows);
+      setLeaderboardStatus(rows.length ? "" : "No donor earnings yet.");
+    } catch (error) {
+      const message = String(error?.message || "Unable to load leaderboard.");
+      if (message.toLowerCase().includes("api route not found")) {
+        setLeaderboardStatus("Backend is outdated. Restart server with latest code.");
+        return;
+      }
+      setLeaderboardStatus(message);
     }
   };
 
@@ -302,12 +342,20 @@ function App() {
     }
 
     const endedAt = performance.now();
+    const workload = outputLength * inner;
+    const normalizedLoad = Math.min(1, workload / 75000);
+    const gpuLoad = Math.round(38 + normalizedLoad * 52);
     return {
       result,
       computeMs: Math.max(1, Math.round(endedAt - startedAt)),
       transferMs: Math.max(1, Math.round((matrixA.length + matrixB.length) / 2000)),
-      gpuLoad: Math.min(98, 55 + Math.floor(Math.random() * 40)),
+      gpuLoad: Math.min(98, Math.max(12, gpuLoad)),
     };
+  };
+
+  const boostGpuUtilization = (value) => {
+    const safeValue = Math.min(98, Math.max(0, Number(value) || 0));
+    setGpuUtilization((prev) => Math.max(prev, safeValue));
   };
 
   const ensureWorkerLLMEngine = async () => {
@@ -321,10 +369,12 @@ function App() {
         initProgressCallback: (report) => {
           const percent = Math.round((report.progress || 0) * 100);
           setWorkerModelStatus(`Loading ${llmModelId}: ${percent}%`);
+          boostGpuUtilization(20 + Math.round((report.progress || 0) * 60));
         },
       });
       llmEngineRef.current = engine;
       setWorkerModelStatus(`Model ready: ${llmModelId}`);
+      setGpuUtilization((prev) => Math.max(10, Math.min(prev, 22)));
       return engine;
     })().finally(() => {
       llmLoadingRef.current = null;
@@ -365,10 +415,41 @@ function App() {
 
     const text = response?.choices?.[0]?.message?.content || "";
     const endedAt = performance.now();
+    const promptBytes = String(prompt).length;
+    const responseBytes = String(text).length;
+    const transferMs = Math.max(2, Math.round((promptBytes + responseBytes) / 140));
+    const gpuLoad = Math.min(98, Math.max(45, Math.round(40 + Math.min(55, (endedAt - startedAt) / 380))));
     return {
       text,
       computeMs: Math.max(1, Math.round(endedAt - startedAt)),
+      transferMs,
+      gpuLoad,
     };
+  };
+
+  const recordTaskMetrics = ({ computeMs, transferMs, gpuLoad }) => {
+    const safeCompute = Math.max(1, Number(computeMs) || 1);
+    const safeTransfer = Math.max(1, Number(transferMs) || 1);
+    const safeGpu = Math.min(98, Math.max(0, Number(gpuLoad) || 0));
+
+    const nextSamples = [...metricSamplesRef.current, {
+      computeMs: safeCompute,
+      transferMs: safeTransfer,
+      gpuLoad: safeGpu,
+    }].slice(-METRIC_WINDOW_SIZE);
+    metricSamplesRef.current = nextSamples;
+
+    const totals = nextSamples.reduce((acc, sample) => ({
+      computeMs: acc.computeMs + sample.computeMs,
+      transferMs: acc.transferMs + sample.transferMs,
+      gpuLoad: acc.gpuLoad + sample.gpuLoad,
+    }), { computeMs: 0, transferMs: 0, gpuLoad: 0 });
+
+    const count = nextSamples.length || 1;
+    setComputeTime(Math.round(totals.computeMs / count));
+    setTransferTime(Math.round(totals.transferMs / count));
+    setGpuUtilization(Math.round(totals.gpuLoad / count));
+    setTasksSolved((prev) => prev + 1);
   };
 
   const creditBrainEarnings = async (delta) => {
@@ -391,6 +472,7 @@ function App() {
       if (payload?.user) {
         setAuthUser(payload.user);
         setBrainEarnings(Number(payload.user.brainEarnings || 0));
+        loadLeaderboard();
       }
     } catch (error) {
       if (String(error?.message || "").toLowerCase().includes("session")) {
@@ -416,6 +498,7 @@ function App() {
         llmCapable: true,
         gpuName: "WebGPU Adapter (Standard)",
         roomId: workerRoomId,
+        username: authUser?.username || "",
       });
       setBrainState("idle");
       // Warm up model right after donor connects to reduce first-request latency.
@@ -438,6 +521,9 @@ function App() {
     socket.on("network-status", (workers = []) => {
       setNetworkWorkers(workers);
     });
+    socket.on("network-clients", (stats = {}) => {
+      setNetworkClients((prev) => ({ ...prev, ...stats }));
+    });
 
     socket.on("worker-links", (links = []) => {
       setWorkerReceivers(Array.isArray(links) ? links : []);
@@ -453,11 +539,8 @@ function App() {
 
       if (isLLMTask) {
         try {
-          const { text, computeMs } = await runWorkerLLMGenerate(payload);
-          setComputeTime(computeMs);
-          setTransferTime(1);
-          setGpuUtilization(95);
-          setTasksSolved((prev) => prev + 1);
+          const { text, computeMs, transferMs, gpuLoad } = await runWorkerLLMGenerate(payload);
+          recordTaskMetrics({ computeMs, transferMs, gpuLoad });
           creditBrainEarnings(0.95);
           socket.emit("compute-result", {
             jobId: payload.jobId,
@@ -486,10 +569,7 @@ function App() {
       }
 
       const { result, computeMs, transferMs, gpuLoad } = runWorkerCompute(payload);
-      setComputeTime(computeMs);
-      setTransferTime(transferMs);
-      setGpuUtilization(gpuLoad);
-      setTasksSolved((prev) => prev + 1);
+      recordTaskMetrics({ computeMs, transferMs, gpuLoad });
       creditBrainEarnings(0.42);
 
       socket.emit("compute-result", {
@@ -506,7 +586,31 @@ function App() {
       socket.disconnect();
       workerSocketRef.current = null;
     };
-  }, [isParticipating, page, workerReconnectKey, workerRoomId]);
+  }, [authUser?.username, isParticipating, page, workerReconnectKey, workerRoomId]);
+
+  useEffect(() => {
+    if (page !== "donator") {
+      setGpuUtilization(0);
+      return undefined;
+    }
+
+    const intervalId = setInterval(() => {
+      setGpuUtilization((prev) => {
+        if (!workerConnected || !isParticipating || brainState === "disconnected") {
+          return Math.max(0, prev - 10);
+        }
+        if (brainState === "computing") {
+          return Math.max(42, prev);
+        }
+        if (prev > 20) {
+          return prev - 4;
+        }
+        return 9 + Math.floor(Math.random() * 7);
+      });
+    }, 1100);
+
+    return () => clearInterval(intervalId);
+  }, [brainState, isParticipating, page, workerConnected]);
 
   useEffect(() => {
     if (page !== "requestor") return undefined;
@@ -514,13 +618,20 @@ function App() {
     const socket = io(SOCKET_URL, SOCKET_OPTIONS);
     userSocketRef.current = socket;
 
-    socket.on("connect", () => setRequestConnected(true));
+    socket.on("connect", () => {
+      setRequestConnected(true);
+      socket.emit("register-requestor", { username: authUser?.username || "" });
+    });
     socket.on("disconnect", () => setRequestConnected(false));
     socket.on("connect_error", (error) => {
       setRequestConnected(false);
+      setRequestLoading(false);
       setRequestStatus(`Connection error: ${error?.message || "Unable to reach server"}`);
     });
     socket.on("network-status", (workers = []) => setNetworkWorkers(workers));
+    socket.on("network-clients", (stats = {}) => {
+      setNetworkClients((prev) => ({ ...prev, ...stats }));
+    });
 
     socket.on("job-status", (msg = {}) => {
       if (msg.status === "Failed") {
@@ -528,6 +639,7 @@ function App() {
           clearTimeout(requestTimeoutRef.current);
           requestTimeoutRef.current = null;
         }
+        setRequestLoading(false);
         setRequestStatus(msg.msg || "Job failed.");
         return;
       }
@@ -547,6 +659,7 @@ function App() {
         clearTimeout(requestTimeoutRef.current);
         requestTimeoutRef.current = null;
       }
+      setRequestLoading(false);
 
       if (result && typeof result === "object" && "text" in result) {
         setRequestStatus("LLM response received.");
@@ -575,10 +688,11 @@ function App() {
         clearTimeout(requestTimeoutRef.current);
         requestTimeoutRef.current = null;
       }
+      setRequestLoading(false);
       socket.disconnect();
       userSocketRef.current = null;
     };
-  }, [page]);
+  }, [authUser?.username, page]);
 
   useEffect(() => {
     if (page !== "server") return undefined;
@@ -593,6 +707,9 @@ function App() {
     socket.on("disconnect", () => setAdminConnected(false));
     socket.on("connect_error", () => setAdminConnected(false));
     socket.on("network-status", (workers = []) => setNetworkWorkers(workers));
+    socket.on("network-clients", (stats = {}) => {
+      setNetworkClients((prev) => ({ ...prev, ...stats }));
+    });
     socket.on("admin-activity", (item) => {
       if (!item) return;
       setAdminLogs((prev) => [item, ...prev].slice(0, 50));
@@ -604,6 +721,7 @@ function App() {
   const launchRequestTask = () => {
     const socket = userSocketRef.current;
     if (!socket || !socket.connected) {
+      setRequestLoading(false);
       setRequestStatus("Not connected to server.");
       return;
     }
@@ -614,11 +732,13 @@ function App() {
         : requestRoom.trim() || "public";
 
     if (!roomId) {
+      setRequestLoading(false);
       setRequestStatus("Enter private room code to connect to a private donor.");
       return;
     }
     const prompt = requestPrompt.trim();
     if (!prompt) {
+      setRequestLoading(false);
       setRequestStatus("Enter a prompt first.");
       return;
     }
@@ -626,6 +746,7 @@ function App() {
     const maxTokens = Math.max(8, Number.parseInt(requestMaxTokens, 10) || 128);
     const temperature = Number(requestTemperature);
 
+    setRequestLoading(true);
     setRequestStatus(`Dispatching LLM prompt to room ${roomId}...`);
     setResultPreview("");
     if (requestTimeoutRef.current) {
@@ -653,7 +774,9 @@ function App() {
   }, [computeTime, transferTime]);
 
   const idleWorkers = networkWorkers.filter((w) => w.status === "idle").length;
-  const visibleWorkerReceivers = workerReceivers.slice(0, 3);
+  const idleDonorWorkers = networkWorkers.filter((w) => w.status === "idle");
+  const connectedDonorWorkers = networkWorkers;
+  const connectedRequestors = Array.isArray(networkClients.requestorsList) ? networkClients.requestorsList : [];
 
   const activePublicRooms = useMemo(() => {
     const roomCounts = new Map();
@@ -670,11 +793,6 @@ function App() {
     return (
       <main className="page">
         {renderSiteTitle()}
-        <section className="card">
-          <p className="socket-state">Signed in as {authUser?.username || "Unknown"}</p>
-          <p className="socket-state">Lifetime $BRAIN: {Number(authUser?.brainEarnings || 0).toFixed(2)}</p>
-          <button type="button" className="small-btn" onClick={handleLogout}>Logout</button>
-        </section>
 
         <section className="donator-layout">
           <aside className="panel metrics-panel">
@@ -754,50 +872,61 @@ function App() {
               <span>Global Brain</span>
             </div>
             <p className="state-text">State: <strong>{brainState === "computing" ? "Computing" : brainState === "disconnected" ? "Disconnected" : "Idle"}</strong></p>
-            <p className="worker-id">Worker ID: {workerId ? `${workerId.slice(0, 8)}...` : "-"}</p>
+            <p className="worker-id">Donor Username: {authUser?.username || (workerId ? `${workerId.slice(0, 8)}...` : "-")}</p>
           </section>
 
           <aside className="panel diagram-panel">
             <h3>Network Connection Diagram</h3>
-            <div
-              className="diagram-grid"
-              style={
-                visibleWorkerReceivers.length > 0
-                  ? { gridTemplateColumns: `repeat(${visibleWorkerReceivers.length}, minmax(0, 1fr))` }
-                  : undefined
-              }
-            >
-              {visibleWorkerReceivers.length === 0 ? (
-                <div className="node empty-node"><span>No active receivers yet</span></div>
-              ) : (
-                visibleWorkerReceivers.map((link) => (
-                  <div className="node" key={link.receiverId}>
-                    <span className="pc-emoji">{"\u{1F4BB}"}</span>
-                    <span>Receiver: {String(link.receiverId || "").slice(0, 6)}...</span>
-                  </div>
-                ))
-              )}
-            </div>
-            {visibleWorkerReceivers.length > 0 ? (
-              <div
-                className="connection-lanes"
-                style={{ gridTemplateColumns: `repeat(${visibleWorkerReceivers.length}, minmax(0, 1fr))` }}
-              >
-                {visibleWorkerReceivers.map((link) => (
-                  <div className="connection-lane" key={`lane-${link.receiverId}`}>
-                    <span className="lane-line" />
-                    <span className="lane-arrow" />
-                  </div>
-                ))}
+            <p className="socket-state">Donors: {networkClients.donors} | Idle: {networkClients.idleDonors} | Busy: {networkClients.busyDonors}</p>
+            <p className="socket-state">Users: {networkClients.requestors} | Admins: {networkClients.admins}</p>
+
+            <div className="diagram-group">
+              <p className="metric-label">Idle Donors</p>
+              <div className="diagram-grid">
+                {idleDonorWorkers.length === 0 ? (
+                  <div className="node empty-node"><span>No idle donors</span></div>
+                ) : (
+                  idleDonorWorkers.map((worker) => (
+                    <div className="node" key={`idle-${worker.id}`}>
+                      <span className="pc-emoji">{"\u{1F4BB}"}</span>
+                      <span>{worker.username || `${String(worker.id || "").slice(0, 6)}...`} [{worker.roomId || "public"}]</span>
+                    </div>
+                  ))
+                )}
               </div>
-            ) : null}
-            <div className="node donor-node">
-              <span className="pc-emoji">{"\u{1F4BB}"}</span>
-              <span>Donator: You</span>
             </div>
-            {workerReceivers.length > 3 ? (
-              <p className="diagram-note">+{workerReceivers.length - 3} more active receiver(s)</p>
-            ) : null}
+
+            <div className="diagram-group">
+              <p className="metric-label">Connected Donors</p>
+              <div className="diagram-grid">
+                {connectedDonorWorkers.length === 0 ? (
+                  <div className="node empty-node"><span>No donors connected</span></div>
+                ) : (
+                  connectedDonorWorkers.map((worker) => (
+                    <div className="node" key={`donor-${worker.id}`}>
+                      <span className="pc-emoji">{"\u{1F4BB}"}</span>
+                      <span>{worker.username || `${String(worker.id || "").slice(0, 6)}...`} [{worker.status}]</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="diagram-group">
+              <p className="metric-label">Connected Users</p>
+              <div className="diagram-grid">
+                {connectedRequestors.length === 0 ? (
+                  <div className="node empty-node"><span>No users connected</span></div>
+                ) : (
+                  connectedRequestors.map((requestor) => (
+                    <div className="node" key={`requestor-${requestor.id}`}>
+                      <span className="pc-emoji">{"\u{1F464}"}</span>
+                      <span>User: {requestor.username || `${String(requestor.id || "").slice(0, 6)}...`}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </aside>
         </section>
 
@@ -805,11 +934,23 @@ function App() {
           <div>
             <h3>Live Leaderboard</h3>
             <ul className="leaderboard">
-              <li>#1 CipherNode - 9241</li>
-              <li>#2 QuantumMint - 8110</li>
-              <li>#3 AtlasDonor - 7568</li>
-              <li>#4 You - {tasksSolved}</li>
+              {leaderboardRows.length > 0 ? leaderboardRows.map((row) => {
+                const isCurrentUser = String(row.username || "").toLowerCase() === String(authUser?.username || "").toLowerCase();
+                return (
+                  <li key={row.id || `${row.username}-${row.rank}`}>
+                    #{row.rank} {row.username}{isCurrentUser ? " (You)" : ""} - {Number(row.brainEarnings || 0).toFixed(2)}
+                  </li>
+                );
+              }) : (
+                <li>{leaderboardStatus}</li>
+              )}
             </ul>
+          </div>
+          <div className="session-wrap metric-card">
+            <p className="metric-label">Account Session</p>
+            <p className="socket-state">Signed in as {authUser?.username || "Unknown"}</p>
+            <p className="socket-state">Lifetime $BRAIN: {Number(authUser?.brainEarnings || 0).toFixed(2)}</p>
+            <button type="button" className="small-btn" onClick={handleLogout}>Logout</button>
           </div>
           <div className="earnings-wrap">
             <p className="metric-label">Contribution &amp; Rewards</p>
@@ -924,6 +1065,12 @@ function App() {
           />
 
           <button type="button" onClick={launchRequestTask}>Generate Response</button>
+          {requestLoading ? (
+            <div className="request-loading-row">
+              <span className="request-spinner" aria-hidden="true" />
+              <span className="request-loading-text">Computing on donor network...</span>
+            </div>
+          ) : null}
 
           <div className="request-status-box">
             <p className="request-status">{requestStatus}</p>

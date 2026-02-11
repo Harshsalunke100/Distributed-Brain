@@ -293,6 +293,27 @@ async function handleApiRequest(req, res) {
     return true;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/leaderboard") {
+    const limitRaw = Number.parseInt(url.searchParams.get("limit"), 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(50, Math.max(1, limitRaw)) : 10;
+
+    const leaderboard = Object.values(authStore.users)
+      .map((user) => ({
+        id: user.id,
+        username: user.username,
+        brainEarnings: Number(user.brainEarnings || 0),
+      }))
+      .sort((a, b) => {
+        if (b.brainEarnings !== a.brainEarnings) return b.brainEarnings - a.brainEarnings;
+        return a.username.localeCompare(b.username);
+      })
+      .slice(0, limit)
+      .map((user, index) => ({ ...user, rank: index + 1 }));
+
+    sendJson(res, 200, { leaderboard });
+    return true;
+  }
+
   sendJson(res, 404, { error: "API route not found." });
   return true;
 }
@@ -322,6 +343,23 @@ instrument(io, {
 const workers = new Map();
 const activeJobs = new Map();
 const workerLinks = new Map();
+const requestors = new Map();
+const admins = new Set();
+
+function broadcastClientStats() {
+  const donors = workers.size;
+  const idleDonors = Array.from(workers.values()).filter((w) => w.status === "idle").length;
+  const busyDonors = Array.from(workers.values()).filter((w) => w.status === "busy").length;
+
+  io.emit("network-clients", {
+    donors,
+    idleDonors,
+    busyDonors,
+    requestors: requestors.size,
+    admins: admins.size,
+    requestorsList: Array.from(requestors.entries()).map(([id, username]) => ({ id, username })),
+  });
+}
 
 function emitWorkerLinks(workerId) {
   const links = workerLinks.get(workerId) || new Map();
@@ -592,8 +630,16 @@ io.on("connection", (socket) => {
 
   socket.on("register-admin", () => {
     socket.join("admins");
+    admins.add(socket.id);
     broadcastNetworkStatus();
+    broadcastClientStats();
     console.log("Admin connected:", socket.id);
+  });
+
+  socket.on("register-requestor", (payload = {}) => {
+    const username = String(payload.username || "").trim();
+    requestors.set(socket.id, username || `user-${socket.id.slice(0, 6)}`);
+    broadcastClientStats();
   });
 
   socket.on("register-worker", (payload = {}) => {
@@ -602,10 +648,11 @@ io.on("connection", (socket) => {
       gpuName = "Unknown",
       roomId = "public",
       llmCapable = false,
+      username = "",
     } = payload;
 
     socket.join(roomId);
-    workers.set(socket.id, { hasWebGPU, gpuName, llmCapable, status: "idle", roomId });
+    workers.set(socket.id, { hasWebGPU, gpuName, llmCapable, status: "idle", roomId, username: String(username || "").trim() });
     workerLinks.set(socket.id, new Map());
     emitWorkerLinks(socket.id);
 
@@ -613,9 +660,13 @@ io.on("connection", (socket) => {
 
     console.log(`Worker Joined Room [${roomId}]: ${gpuName} (${socket.id})`);
     broadcastNetworkStatus();
+    broadcastClientStats();
   });
 
   socket.on("disconnect", () => {
+    requestors.delete(socket.id);
+    admins.delete(socket.id);
+
     if (workers.has(socket.id)) {
       retryChunksForWorker(socket.id);
       workers.delete(socket.id);
@@ -623,6 +674,8 @@ io.on("connection", (socket) => {
       console.log("Worker Disconnected:", socket.id);
       broadcastNetworkStatus();
     }
+
+    broadcastClientStats();
   });
 
   socket.on("request-matrix-job", (payload = {}) => {
@@ -789,6 +842,7 @@ io.on("connection", (socket) => {
 function broadcastNetworkStatus() {
   const list = Array.from(workers.entries()).map(([id, data]) => ({ id, ...data }));
   io.emit("network-status", list);
+  broadcastClientStats();
 }
 
 httpServer.listen(PORT, HOST, () => {

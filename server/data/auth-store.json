@@ -1,0 +1,76 @@
+{
+  "users": {
+    "harsh": {
+      "id": "usr_1770778585357_4714",
+      "username": "harsh",
+      "passwordSalt": "dbdd9950d1f794afb62c43f40627f7de",
+      "passwordHash": "3e8d0a1a0860612e3f48fd75a32274680fe6c2f472d8e66e4eaf604fd6561e8b8e1d62d2eafd0beb7c1bfdc60fd339eb0f90e773631117c5a831817c45f07824",
+      "brainEarnings": 11.4,
+      "createdAt": "2026-02-11T02:56:25.357Z",
+      "lastLoginAt": "2026-02-11T03:03:32.036Z"
+    },
+    "vignesh": {
+      "id": "usr_1770778869132_9007",
+      "username": "vignesh",
+      "passwordSalt": "36fc622f73783d04aad082e9156142e2",
+      "passwordHash": "2123d5a0295a8952871e5310261e73447c781459f15699af91a264f940b63820340a5e23aa017fb7b5a13613a2f42980d75807e91c10c829e83d57dbfe58fbe8",
+      "brainEarnings": 0,
+      "createdAt": "2026-02-11T03:01:09.132Z",
+      "lastLoginAt": "2026-02-11T03:27:27.034Z"
+    },
+    "vigo": {
+      "id": "usr_1770778964203_6059",
+      "username": "Vigo",
+      "passwordSalt": "9afffaf7ebe534faa0421bac2b234a14",
+      "passwordHash": "af133aa20e5894ab1f4a0a27386fcf0861d6eed66235f677459cf4d01034344c3655d699cd1ac8281b377959ef58459782a0749f11d41e0d7a1cc88d3dc0dc43",
+      "brainEarnings": 6.65,
+      "createdAt": "2026-02-11T03:02:44.203Z",
+      "lastLoginAt": "2026-02-11T03:02:44.203Z"
+    },
+    "sam": {
+      "id": "usr_1770779014948_7999",
+      "username": "sam",
+      "passwordSalt": "f2022bd9f661794434d4a4e403c4b50b",
+      "passwordHash": "c7cdb8cdf055326b4451fe84a33ffd1d8add9c6e1c83dc738699ef520799e35355ee0162d599b20fab01636d03646157fe165fd1163bdd759968af300530c94e",
+      "brainEarnings": 9.5,
+      "createdAt": "2026-02-11T03:03:34.948Z",
+      "lastLoginAt": "2026-02-11T03:03:34.948Z"
+    },
+    "admin": {
+      "id": "usr_1770779577080_8419",
+      "username": "admin",
+      "passwordSalt": "615478b1e4fc60c63c468820cc017ea3",
+      "passwordHash": "24f438a20f7ff242be2ca1b8cd714bf58eaa5bae1148633cf815b03a6768c592ef7b401b5ea9bdfe73acc7176931e703d3bf4beff48d1e2ab892dad64596f985",
+      "brainEarnings": 0,
+      "createdAt": "2026-02-11T03:12:57.080Z",
+      "lastLoginAt": "2026-02-11T03:24:43.796Z"
+    }
+  },
+  "sessions": {
+    "f5c85c960f7e5032dbd8b8c2d350288b1eeb7cd6534436fd0afd3adfea68747b": {
+      "userId": "usr_1770778964203_6059",
+      "createdAt": "2026-02-11T03:02:44.282Z",
+      "expiresAt": 1773370964282
+    },
+    "58d58e4ccede147dfb3f9763d4bee0e0629e6d3a7229d73459ccef66ea8e0ffb": {
+      "userId": "usr_1770778585357_4714",
+      "createdAt": "2026-02-11T03:03:04.275Z",
+      "expiresAt": 1773370984275
+    },
+    "68babb129e485540413ba5254b9a4656ddad7399dfcdb44eec6de3f62ebf21d0": {
+      "userId": "usr_1770778585357_4714",
+      "createdAt": "2026-02-11T03:03:32.036Z",
+      "expiresAt": 1773371012036
+    },
+    "b40304b73454fc65e7b7f8a3bc2c4c8569e8ab081189d9b6ef8c17db1a519258": {
+      "userId": "usr_1770779014948_7999",
+      "createdAt": "2026-02-11T03:03:35.027Z",
+      "expiresAt": 1773371015027
+    },
+    "76f6037f4b7eda6edd3ee0fd96434b7b06b2e3def80a4226e234f87555af4ad8": {
+      "userId": "usr_1770778869132_9007",
+      "createdAt": "2026-02-11T03:27:27.034Z",
+      "expiresAt": 1773372447034
+    }
+  }
+}

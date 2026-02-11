@@ -10,6 +10,7 @@ const SOCKET_OPTIONS = {
   timeout: 10000,
   transports: ["websocket", "polling"],
 };
+const SESSION_TOKEN_KEY = "distributed_brain_session_token";
 
 const buildGlobeMesh = (nodeCount = 520, maxEdges = 2600) => {
   const nodes = [];
@@ -74,12 +75,17 @@ function App() {
   const [page, setPage] = useState("auth");
   const [mode, setMode] = useState("register");
   const [formData, setFormData] = useState({ username: "", password: "" });
+  const [authToken, setAuthToken] = useState("");
+  const [authUser, setAuthUser] = useState(null);
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
 
   const workerSocketRef = useRef(null);
   const userSocketRef = useRef(null);
   const llmEngineRef = useRef(null);
   const llmLoadingRef = useRef(null);
   const requestTimeoutRef = useRef(null);
+  const authTokenRef = useRef("");
 
   const [networkWorkers, setNetworkWorkers] = useState([]);
 
@@ -121,19 +127,130 @@ function App() {
     return "public";
   }, [workerRoomInput, workerRoomType]);
 
+  const apiBaseUrl = useMemo(() => SOCKET_URL.replace(/\/$/, ""), []);
+
+  useEffect(() => {
+    authTokenRef.current = authToken;
+  }, [authToken]);
+
+  const setAuthSession = (token, user) => {
+    setAuthToken(token);
+    setAuthUser(user);
+    setBrainEarnings(Number(user?.brainEarnings || 0));
+    if (token) {
+      localStorage.setItem(SESSION_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(SESSION_TOKEN_KEY);
+    }
+  };
+
+  const clearAuthSession = () => {
+    setAuthSession("", null);
+    setPage("auth");
+    setBrainEarnings(0);
+    setTasksSolved(0);
+  };
+
+  const fetchApi = async (path, { method = "GET", body, token, timeoutMs = 10000 } = {}) => {
+    const headers = {};
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
+    const authHeaderToken = token ?? authTokenRef.current;
+    if (authHeaderToken) {
+      headers.Authorization = `Bearer ${authHeaderToken}`;
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(`${apiBaseUrl}${path}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error(`Server timeout after ${Math.round(timeoutMs / 1000)}s. Check backend at ${apiBaseUrl}.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || `Request failed (${response.status})`);
+    }
+    return payload;
+  };
+
+  useEffect(() => {
+    const run = async () => {
+      const token = localStorage.getItem(SESSION_TOKEN_KEY);
+      if (!token) return;
+      try {
+        const payload = await fetchApi("/api/session", { token });
+        setAuthSession(token, payload.user);
+        setPage("role");
+      } catch {
+        localStorage.removeItem(SESSION_TOKEN_KEY);
+      }
+    };
+    run();
+  }, []);
+
+  useEffect(() => {
+    if (page !== "auth" && !authUser) {
+      setPage("auth");
+    }
+  }, [authUser, page]);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
+    setAuthError("");
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
-  const handleAuthSubmit = (e) => {
+  const handleAuthSubmit = async (e) => {
     e.preventDefault();
-    if (mode === "register") {
-      console.log("Register payload:", formData);
+    const username = formData.username.trim();
+    const password = formData.password;
+
+    if (!username || !password) {
+      setAuthError("Username and password are required.");
       return;
     }
-    console.log("Login payload:", formData);
-    setPage("role");
+
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const path = mode === "register" ? "/api/register" : "/api/login";
+      const payload = await fetchApi(path, {
+        method: "POST",
+        body: { username, password },
+      });
+      setAuthSession(payload.token, payload.user);
+      setPage("role");
+    } catch (error) {
+      const raw = String(error?.message || "");
+      setAuthError(raw || "Authentication failed.");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    const token = authTokenRef.current;
+    try {
+      if (token) {
+        await fetchApi("/api/logout", { method: "POST", token });
+      }
+    } catch {
+      // Ignore logout transport errors and clear local session anyway.
+    } finally {
+      clearAuthSession();
+    }
   };
 
   const renderSiteTitle = () => (
@@ -254,6 +371,34 @@ function App() {
     };
   };
 
+  const creditBrainEarnings = async (delta) => {
+    if (!Number.isFinite(delta) || delta <= 0) return;
+
+    setBrainEarnings((prev) => Number((prev + delta).toFixed(2)));
+    setAuthUser((prev) => (
+      prev
+        ? { ...prev, brainEarnings: Number((Number(prev.brainEarnings || 0) + delta).toFixed(2)) }
+        : prev
+    ));
+
+    if (!authTokenRef.current) return;
+
+    try {
+      const payload = await fetchApi("/api/donor/earnings", {
+        method: "POST",
+        body: { delta },
+      });
+      if (payload?.user) {
+        setAuthUser(payload.user);
+        setBrainEarnings(Number(payload.user.brainEarnings || 0));
+      }
+    } catch (error) {
+      if (String(error?.message || "").toLowerCase().includes("session")) {
+        clearAuthSession();
+      }
+    }
+  };
+
   useEffect(() => {
     if (page !== "donator" || !isParticipating) {
       setBrainState(isParticipating ? "idle" : "disconnected");
@@ -313,7 +458,7 @@ function App() {
           setTransferTime(1);
           setGpuUtilization(95);
           setTasksSolved((prev) => prev + 1);
-          setBrainEarnings((prev) => Number((prev + 0.95).toFixed(2)));
+          creditBrainEarnings(0.95);
           socket.emit("compute-result", {
             jobId: payload.jobId,
             chunkId: payload.chunkId ?? 0,
@@ -345,7 +490,7 @@ function App() {
       setTransferTime(transferMs);
       setGpuUtilization(gpuLoad);
       setTasksSolved((prev) => prev + 1);
-      setBrainEarnings((prev) => Number((prev + 0.42).toFixed(2)));
+      creditBrainEarnings(0.42);
 
       socket.emit("compute-result", {
         jobId: payload.jobId,
@@ -525,6 +670,11 @@ function App() {
     return (
       <main className="page">
         {renderSiteTitle()}
+        <section className="card">
+          <p className="socket-state">Signed in as {authUser?.username || "Unknown"}</p>
+          <p className="socket-state">Lifetime $BRAIN: {Number(authUser?.brainEarnings || 0).toFixed(2)}</p>
+          <button type="button" className="small-btn" onClick={handleLogout}>Logout</button>
+        </section>
 
         <section className="donator-layout">
           <aside className="panel metrics-panel">
@@ -862,6 +1012,9 @@ function App() {
         <section className="card options-card">
           <h2>Choose Your Role</h2>
           <p className="subtitle">Select how you want to use the network.</p>
+          <p className="socket-state">Logged in as {authUser?.username || "-"}</p>
+          <p className="socket-state">Lifetime $BRAIN: {Number(authUser?.brainEarnings || 0).toFixed(2)}</p>
+          <button type="button" className="small-btn" onClick={handleLogout}>Logout</button>
 
           <div className="option-block">
             <button type="button" className="option-btn" onClick={() => setPage("donator")}>1: Donator (Worker)</button>
@@ -901,11 +1054,15 @@ function App() {
           <label htmlFor="password">Password</label>
           <input id="password" name="password" type="password" value={formData.password} onChange={handleChange} required minLength={6} placeholder="Enter password" />
 
-          <button type="submit">{mode === "register" ? "Register" : "Login"}</button>
+          <button type="submit" disabled={authBusy}>{authBusy ? "Please wait..." : mode === "register" ? "Register" : "Login"}</button>
+          {authError ? <p className="request-status">{authError}</p> : null}
 
           <p className="login-text">
             {mode === "register" ? "Already a user? " : "New user? "}
-            <button type="button" className="switch-btn" onClick={() => setMode((prev) => (prev === "register" ? "login" : "register"))}>
+            <button type="button" className="switch-btn" onClick={() => {
+              setAuthError("");
+              setMode((prev) => (prev === "register" ? "login" : "register"));
+            }}>
               {mode === "register" ? "Login" : "Create Account"}
             </button>
           </p>

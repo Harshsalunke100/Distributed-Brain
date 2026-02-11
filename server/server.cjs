@@ -1,13 +1,314 @@
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const { instrument } = require("@socket.io/admin-ui");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const CHUNK_TIMEOUT_MS = Number(process.env.CHUNK_TIMEOUT_MS || 45000);
 const MAX_CHUNK_RETRIES = Number(process.env.MAX_CHUNK_RETRIES || 2);
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 24 * 30);
+const AUTH_STORE_PATH = path.join(__dirname, "data", "auth-store.json");
 
-const httpServer = createServer();
+function ensureAuthStoreFile() {
+  const dir = path.dirname(AUTH_STORE_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  if (!fs.existsSync(AUTH_STORE_PATH)) {
+    const initial = { users: {}, sessions: {} };
+    fs.writeFileSync(AUTH_STORE_PATH, JSON.stringify(initial, null, 2));
+  }
+}
+
+function loadAuthStore() {
+  ensureAuthStoreFile();
+  try {
+    const raw = fs.readFileSync(AUTH_STORE_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      users: parsed?.users && typeof parsed.users === "object" ? parsed.users : {},
+      sessions: parsed?.sessions && typeof parsed.sessions === "object" ? parsed.sessions : {},
+    };
+  } catch {
+    return { users: {}, sessions: {} };
+  }
+}
+
+let authStore = loadAuthStore();
+
+function saveAuthStore() {
+  fs.writeFileSync(AUTH_STORE_PATH, JSON.stringify(authStore, null, 2));
+}
+
+function normalizeUsername(username) {
+  return String(username || "").trim().toLowerCase();
+}
+
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString("hex");
+}
+
+function toPublicUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    brainEarnings: Number(user.brainEarnings || 0),
+    createdAt: user.createdAt,
+    lastLoginAt: user.lastLoginAt,
+  };
+}
+
+function getUserById(userId) {
+  for (const user of Object.values(authStore.users)) {
+    if (user.id === userId) return user;
+  }
+  return null;
+}
+
+function createSessionForUser(userId) {
+  const token = crypto.randomBytes(32).toString("hex");
+  authStore.sessions[token] = {
+    userId,
+    createdAt: new Date().toISOString(),
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  };
+  return token;
+}
+
+function cleanupExpiredSessions() {
+  const now = Date.now();
+  let changed = false;
+  for (const [token, session] of Object.entries(authStore.sessions)) {
+    if (!session || Number(session.expiresAt || 0) <= now) {
+      delete authStore.sessions[token];
+      changed = true;
+    }
+  }
+  if (changed) saveAuthStore();
+}
+
+cleanupExpiredSessions();
+setInterval(cleanupExpiredSessions, 30 * 60 * 1000).unref();
+
+function sendJson(res, statusCode, payload) {
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  });
+  res.end(JSON.stringify(payload));
+}
+
+function parseRequestUrl(req) {
+  return new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+
+    req.on("data", (chunk) => {
+      raw += chunk;
+      if (raw.length > 1_000_000) {
+        reject(new Error("Payload too large"));
+        req.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      if (!raw) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+
+    req.on("error", (error) => reject(error));
+  });
+}
+
+function getSessionFromRequest(req) {
+  const authHeader = String(req.headers.authorization || "");
+  if (!authHeader.startsWith("Bearer ")) return { token: "", session: null, user: null };
+
+  const token = authHeader.slice(7).trim();
+  if (!token) return { token: "", session: null, user: null };
+
+  const session = authStore.sessions[token];
+  if (!session) return { token, session: null, user: null };
+
+  if (Number(session.expiresAt || 0) <= Date.now()) {
+    delete authStore.sessions[token];
+    saveAuthStore();
+    return { token, session: null, user: null };
+  }
+
+  const user = getUserById(session.userId);
+  if (!user) {
+    delete authStore.sessions[token];
+    saveAuthStore();
+    return { token, session: null, user: null };
+  }
+
+  return { token, session, user };
+}
+
+async function handleApiRequest(req, res) {
+  const url = parseRequestUrl(req);
+  if (!url.pathname.startsWith("/api/")) return false;
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    });
+    res.end();
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/register") {
+    const body = await readJsonBody(req);
+    const username = String(body.username || "").trim();
+    const password = String(body.password || "");
+
+    if (username.length < 3) {
+      sendJson(res, 400, { error: "Username must be at least 3 characters." });
+      return true;
+    }
+    if (password.length < 6) {
+      sendJson(res, 400, { error: "Password must be at least 6 characters." });
+      return true;
+    }
+
+    const normalized = normalizeUsername(username);
+    if (authStore.users[normalized]) {
+      sendJson(res, 409, { error: "Username already exists." });
+      return true;
+    }
+
+    const salt = crypto.randomBytes(16).toString("hex");
+    const nowIso = new Date().toISOString();
+    const user = {
+      id: `usr_${Date.now()}_${crypto.randomInt(1000, 9999)}`,
+      username,
+      passwordSalt: salt,
+      passwordHash: hashPassword(password, salt),
+      brainEarnings: 0,
+      createdAt: nowIso,
+      lastLoginAt: nowIso,
+    };
+
+    authStore.users[normalized] = user;
+    const token = createSessionForUser(user.id);
+    saveAuthStore();
+
+    sendJson(res, 201, { token, user: toPublicUser(user) });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/login") {
+    const body = await readJsonBody(req);
+    const username = String(body.username || "").trim();
+    const password = String(body.password || "");
+    const normalized = normalizeUsername(username);
+    const user = authStore.users[normalized];
+
+    if (!user) {
+      sendJson(res, 401, { error: "Invalid username or password." });
+      return true;
+    }
+
+    const expectedHash = hashPassword(password, user.passwordSalt);
+    if (expectedHash !== user.passwordHash) {
+      sendJson(res, 401, { error: "Invalid username or password." });
+      return true;
+    }
+
+    user.lastLoginAt = new Date().toISOString();
+    authStore.users[normalized] = user;
+
+    const token = createSessionForUser(user.id);
+    saveAuthStore();
+
+    sendJson(res, 200, { token, user: toPublicUser(user) });
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/session") {
+    const { user } = getSessionFromRequest(req);
+    if (!user) {
+      sendJson(res, 401, { error: "Session invalid or expired." });
+      return true;
+    }
+    sendJson(res, 200, { user: toPublicUser(user) });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/logout") {
+    const { token } = getSessionFromRequest(req);
+    if (token && authStore.sessions[token]) {
+      delete authStore.sessions[token];
+      saveAuthStore();
+    }
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/donor/earnings") {
+    const { user } = getSessionFromRequest(req);
+    if (!user) {
+      sendJson(res, 401, { error: "Session invalid or expired." });
+      return true;
+    }
+
+    const body = await readJsonBody(req);
+    const delta = Number(body.delta);
+    if (!Number.isFinite(delta) || delta <= 0) {
+      sendJson(res, 400, { error: "delta must be a positive number." });
+      return true;
+    }
+
+    const normalized = normalizeUsername(user.username);
+    const dbUser = authStore.users[normalized];
+    if (!dbUser) {
+      sendJson(res, 404, { error: "User account not found." });
+      return true;
+    }
+
+    const next = Number((Number(dbUser.brainEarnings || 0) + delta).toFixed(2));
+    dbUser.brainEarnings = next;
+    authStore.users[normalized] = dbUser;
+    saveAuthStore();
+
+    sendJson(res, 200, { user: toPublicUser(dbUser) });
+    return true;
+  }
+
+  sendJson(res, 404, { error: "API route not found." });
+  return true;
+}
+
+const httpServer = createServer(async (req, res) => {
+  try {
+    const handled = await handleApiRequest(req, res);
+    if (handled) return;
+
+    res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "Not found" }));
+  } catch (error) {
+    sendJson(res, 500, { error: error?.message || "Internal server error" });
+  }
+});
+
 const io = new Server(httpServer, {
   cors: { origin: "*" },
   maxHttpBufferSize: 1e8,

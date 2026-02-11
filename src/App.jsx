@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
-const DEFAULT_SOCKET_URL = `${window.location.protocol}//${window.location.hostname || "localhost"}:3000`;
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || DEFAULT_SOCKET_URL;
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://192.168.1.62:3000";
 
 const buildGlobeMesh = (nodeCount = 520, maxEdges = 2600) => {
   const nodes = [];
@@ -302,7 +301,6 @@ function App() {
           setTasksSolved((prev) => prev + 1);
           setBrainEarnings((prev) => Number((prev + 0.95).toFixed(2)));
           socket.emit("compute-result", {
-            jobId: payload.jobId,
             result: { text, model: llmModelId },
             computeTimeMs: computeMs,
             from: payload.from,
@@ -310,7 +308,6 @@ function App() {
           });
         } catch (error) {
           socket.emit("compute-result", {
-            jobId: payload.jobId,
             result: {
               text: `LLM generation failed: ${error?.message || "Unknown error"}`,
               model: llmModelId,

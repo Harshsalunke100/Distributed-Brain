@@ -561,6 +561,13 @@ function assignChunkToWorker(jobId, chunkId, workerId) {
     from: job.fromSocket,
   });
 
+  io.to(job.fromSocket).emit("job-status", {
+    status: "Assigned",
+    worker: workerId,
+    workerUsername: worker.username || "",
+    msg: `Assigned to donor ${worker.username || `${String(workerId || "").slice(0, 6)}...`}`,
+  });
+
   return true;
 }
 
@@ -580,6 +587,26 @@ function dispatchPendingChunks(jobId) {
       job.jobType === "llm_generate"
         ? getIdleLlmWorkersInRoom(job.roomId)
         : getIdleWorkersInRoom(job.roomId);
+
+    if (job.preferredWorkerId && job.jobType === "llm_generate") {
+      const preferred = workers.get(job.preferredWorkerId);
+      const preferredEligible =
+        preferred &&
+        preferred.status === "idle" &&
+        preferred.roomId === job.roomId &&
+        preferred.llmCapable;
+
+      if (!preferredEligible) {
+        io.to(job.fromSocket).emit("job-status", {
+          status: "Queued",
+          msg: "Waiting for selected donor to become available...",
+        });
+        continue;
+      }
+
+      assignChunkToWorker(jobId, chunk.chunkId, job.preferredWorkerId);
+      continue;
+    }
 
     if (!idleWorkers.length) {
       io.to(job.fromSocket).emit("job-status", {
@@ -703,6 +730,7 @@ io.on("connection", (socket) => {
         roomId,
         task,
         jobType: "llm_generate",
+        preferredWorkerId: String(payload.preferredWorkerId || "").trim() || null,
         startTime: Date.now(),
         totalChunks: 1,
         receivedChunks: 0,
@@ -723,11 +751,6 @@ io.on("connection", (socket) => {
       });
 
       dispatchPendingChunks(jobId);
-
-      socket.emit("job-status", {
-        status: "Assigned",
-        msg: "LLM request queued for fault-tolerant dispatch.",
-      });
       return;
     }
 

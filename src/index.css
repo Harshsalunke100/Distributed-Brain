@@ -635,15 +635,65 @@ button:hover {
 }
 
 .requestor-card {
-  max-width: 560px;
+  max-width: 1260px;
   display: grid;
-  gap: 0.75rem;
+  gap: 1.45rem;
 }
 
 .llm-config-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.65rem;
+  gap: 2.66rem;
+}
+
+.llm-config-item {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.llm-config-item label {
+  font-size: 0.86rem;
+}
+
+.compact-input {
+  width: 100%;
+  max-width: none;
+  min-height: 48px;
+  padding: 0.68rem 0.85rem;
+  font-size: 1rem;
+  border-radius: 10px;
+}
+
+.compact-select {
+  width: 100%;
+  min-height: 48px;
+  padding: 0.68rem 0.85rem;
+  border: 1px solid #365188;
+  border-radius: 10px;
+  background: rgba(3, 8, 20, 0.92);
+  color: #e6f5ff;
+  font-size: 1rem;
+}
+
+.compact-select:focus {
+  border-color: #00b6ff;
+  outline: 2px solid rgba(0, 182, 255, 0.23);
+}
+
+.donor-picker-row {
+  margin-top: 0.35rem;
+  display: grid;
+  grid-template-columns: 252px 1fr;
+  align-items: center;
+  gap: 2.1rem;
+}
+
+.request-prompt {
+  min-height: 120px;
+}
+
+.donor-picker-row label {
+  margin: 0;
 }
 
 .room-scanner {
@@ -898,6 +948,11 @@ button:hover {
 
   .llm-config-grid {
     grid-template-columns: 1fr;
+  }
+
+  .donor-picker-row {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
   }
 }
 

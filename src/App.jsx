@@ -123,9 +123,11 @@ function App() {
   const [requestTargetType, setRequestTargetType] = useState("public");
   const [requestRoom, setRequestRoom] = useState("public");
   const [requestPrivateCode, setRequestPrivateCode] = useState("");
+  const [requestPreferredDonorId, setRequestPreferredDonorId] = useState("");
   const [requestStatus, setRequestStatus] = useState("LLM request panel is ready.");
   const [resultPreview, setResultPreview] = useState("");
   const [requestLoading, setRequestLoading] = useState(false);
+  const [requestAssignedDonor, setRequestAssignedDonor] = useState("");
 
   const [adminConnected, setAdminConnected] = useState(false);
   const [adminLogs, setAdminLogs] = useState([]);
@@ -640,6 +642,7 @@ function App() {
           requestTimeoutRef.current = null;
         }
         setRequestLoading(false);
+        setRequestAssignedDonor("");
         setRequestStatus(msg.msg || "Job failed.");
         return;
       }
@@ -648,6 +651,9 @@ function App() {
         return;
       }
       if (msg.status === "Assigned") {
+        if (msg.workerUsername) {
+          setRequestAssignedDonor(String(msg.workerUsername));
+        }
         setRequestStatus(msg.msg || `Assigned to Worker: ${String(msg.worker || "").slice(0, 6)}...`);
       } else {
         setRequestStatus(msg.msg || "Queued. Waiting for worker...");
@@ -660,6 +666,7 @@ function App() {
         requestTimeoutRef.current = null;
       }
       setRequestLoading(false);
+      setRequestAssignedDonor("");
 
       if (result && typeof result === "object" && "text" in result) {
         setRequestStatus("LLM response received.");
@@ -689,6 +696,7 @@ function App() {
         requestTimeoutRef.current = null;
       }
       setRequestLoading(false);
+      setRequestAssignedDonor("");
       socket.disconnect();
       userSocketRef.current = null;
     };
@@ -747,6 +755,7 @@ function App() {
     const temperature = Number(requestTemperature);
 
     setRequestLoading(true);
+    setRequestAssignedDonor("");
     setRequestStatus(`Dispatching LLM prompt to room ${roomId}...`);
     setResultPreview("");
     if (requestTimeoutRef.current) {
@@ -764,6 +773,7 @@ function App() {
       temperature: Number.isFinite(temperature) ? temperature : 0.7,
       roomId,
       modelId: llmModelId,
+      preferredWorkerId: requestTargetType === "public" ? requestPreferredDonorId : "",
     });
   };
 
@@ -789,6 +799,26 @@ function App() {
     return Array.from(roomCounts.entries());
   }, [networkWorkers]);
 
+  const idlePublicDonors = useMemo(() => (
+    networkWorkers.filter((w) => w.status === "idle" && (w.roomId || "public") === "public")
+  ), [networkWorkers]);
+
+  useEffect(() => {
+    if (!requestPreferredDonorId) return;
+    const stillAvailable = idlePublicDonors.some((w) => w.id === requestPreferredDonorId);
+    if (!stillAvailable) {
+      setRequestPreferredDonorId("");
+    }
+  }, [idlePublicDonors, requestPreferredDonorId]);
+
+  useEffect(() => {
+    if (requestTargetType === "private") {
+      setRequestPreferredDonorId("");
+    }
+  }, [requestTargetType]);
+
+  const getSafeRoomLabel = (roomId) => (String(roomId || "public") === "public" ? "public" : "private");
+
   if (page === "donator") {
     return (
       <main className="page">
@@ -810,7 +840,7 @@ function App() {
                 <input value={workerRoomInput} onChange={(e) => setWorkerRoomInput(e.target.value)} placeholder="Enter room code" />
               ) : null}
               <button type="button" className="small-btn" onClick={() => setWorkerReconnectKey((v) => v + 1)}>Connect / Rejoin</button>
-              <p className="worker-id">Current Room: {workerRoomId}</p>
+              <p className="worker-id">Current Room: {getSafeRoomLabel(workerRoomId)}</p>
             </div>
 
             <div className="gpu-ring" style={{ background: `conic-gradient(#00f6ff ${gpuUtilization * 3.6}deg, #1d2756 0deg)` }}>
@@ -889,7 +919,7 @@ function App() {
                   idleDonorWorkers.map((worker) => (
                     <div className="node" key={`idle-${worker.id}`}>
                       <span className="pc-emoji">{"\u{1F4BB}"}</span>
-                      <span>{worker.username || `${String(worker.id || "").slice(0, 6)}...`} [{worker.roomId || "public"}]</span>
+                      <span>{worker.username || `${String(worker.id || "").slice(0, 6)}...`} [{getSafeRoomLabel(worker.roomId)}]</span>
                     </div>
                   ))
                 )}
@@ -1020,19 +1050,57 @@ function App() {
             ) : null}
           </div>
 
+          <div className="room-scanner">
+            <p className="metric-label">Idle Donor Usernames</p>
+            {requestTargetType === "private" ? (
+              <span className="network-status">Idle donor list is available in public mode.</span>
+            ) : (
+              <>
+                <div className="donor-picker-row">
+                  <label htmlFor="preferredDonor">Choose Donor</label>
+                  <select
+                    className="compact-select"
+                    id="preferredDonor"
+                    value={requestPreferredDonorId}
+                    onChange={(e) => setRequestPreferredDonorId(e.target.value)}
+                  >
+                    <option value="">Auto-assign any idle donor</option>
+                    {idlePublicDonors.map((donor) => (
+                      <option key={donor.id} value={donor.id}>
+                        {donor.username || `${String(donor.id || "").slice(0, 6)}...`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="room-badges">
+                  {idlePublicDonors.length === 0 ? (
+                    <span className="network-status">No idle public donors right now.</span>
+                  ) : idlePublicDonors.map((donor) => (
+                    <span key={`idle-public-donor-${donor.id}`} className="room-badge">
+                      {donor.username || `${String(donor.id || "").slice(0, 6)}...`}
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
           <label htmlFor="prompt">Prompt</label>
           <textarea
+            className="request-prompt"
             id="prompt"
             value={requestPrompt}
             onChange={(e) => setRequestPrompt(e.target.value)}
-            rows={7}
+            rows={5}
             placeholder="Ask your question here..."
           />
 
           <div className="llm-config-grid">
-            <div>
+            <div className="llm-config-item">
               <label htmlFor="maxTokens">Max Tokens</label>
               <input
+                className="compact-input"
                 id="maxTokens"
                 type="number"
                 min={8}
@@ -1041,9 +1109,10 @@ function App() {
                 onChange={(e) => setRequestMaxTokens(e.target.value)}
               />
             </div>
-            <div>
+            <div className="llm-config-item">
               <label htmlFor="temperature">Temperature</label>
               <input
+                className="compact-input"
                 id="temperature"
                 type="number"
                 step="0.1"
@@ -1068,7 +1137,11 @@ function App() {
           {requestLoading ? (
             <div className="request-loading-row">
               <span className="request-spinner" aria-hidden="true" />
-              <span className="request-loading-text">Computing on donor network...</span>
+              <span className="request-loading-text">
+                {requestAssignedDonor
+                  ? `Computing on ${requestAssignedDonor}'s network...`
+                  : "Computing on donor network..."}
+              </span>
             </div>
           ) : null}
 
@@ -1122,7 +1195,7 @@ function App() {
                 {networkWorkers.map((w) => (
                   <tr key={w.id}>
                     <td>{String(w.id).slice(0, 8)}...</td>
-                    <td><span className="room-pill">{w.roomId || "public"}</span></td>
+                    <td><span className="room-pill">{getSafeRoomLabel(w.roomId)}</span></td>
                     <td>{w.gpuName || "Unknown"}</td>
                     <td className={w.status === "idle" ? "status-idle" : "status-busy"}>{String(w.status || "unknown").toUpperCase()}</td>
                   </tr>

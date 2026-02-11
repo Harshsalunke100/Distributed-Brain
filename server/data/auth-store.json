@@ -5,7 +5,7 @@
       "username": "harsh",
       "passwordSalt": "dbdd9950d1f794afb62c43f40627f7de",
       "passwordHash": "3e8d0a1a0860612e3f48fd75a32274680fe6c2f472d8e66e4eaf604fd6561e8b8e1d62d2eafd0beb7c1bfdc60fd339eb0f90e773631117c5a831817c45f07824",
-      "brainEarnings": 11.4,
+      "brainEarnings": 17.1,
       "createdAt": "2026-02-11T02:56:25.357Z",
       "lastLoginAt": "2026-02-11T03:03:32.036Z"
     },
@@ -14,18 +14,18 @@
       "username": "vignesh",
       "passwordSalt": "36fc622f73783d04aad082e9156142e2",
       "passwordHash": "2123d5a0295a8952871e5310261e73447c781459f15699af91a264f940b63820340a5e23aa017fb7b5a13613a2f42980d75807e91c10c829e83d57dbfe58fbe8",
-      "brainEarnings": 0,
+      "brainEarnings": 1.9,
       "createdAt": "2026-02-11T03:01:09.132Z",
-      "lastLoginAt": "2026-02-11T03:27:27.034Z"
+      "lastLoginAt": "2026-02-11T03:58:46.751Z"
     },
     "vigo": {
       "id": "usr_1770778964203_6059",
       "username": "Vigo",
       "passwordSalt": "9afffaf7ebe534faa0421bac2b234a14",
       "passwordHash": "af133aa20e5894ab1f4a0a27386fcf0861d6eed66235f677459cf4d01034344c3655d699cd1ac8281b377959ef58459782a0749f11d41e0d7a1cc88d3dc0dc43",
-      "brainEarnings": 6.65,
+      "brainEarnings": 8.55,
       "createdAt": "2026-02-11T03:02:44.203Z",
-      "lastLoginAt": "2026-02-11T03:02:44.203Z"
+      "lastLoginAt": "2026-02-11T03:54:36.155Z"
     },
     "sam": {
       "id": "usr_1770779014948_7999",
@@ -34,7 +34,7 @@
       "passwordHash": "c7cdb8cdf055326b4451fe84a33ffd1d8add9c6e1c83dc738699ef520799e35355ee0162d599b20fab01636d03646157fe165fd1163bdd759968af300530c94e",
       "brainEarnings": 9.5,
       "createdAt": "2026-02-11T03:03:34.948Z",
-      "lastLoginAt": "2026-02-11T03:03:34.948Z"
+      "lastLoginAt": "2026-02-11T03:59:46.058Z"
     },
     "admin": {
       "id": "usr_1770779577080_8419",
@@ -71,6 +71,26 @@
       "userId": "usr_1770778869132_9007",
       "createdAt": "2026-02-11T03:27:27.034Z",
       "expiresAt": 1773372447034
+    },
+    "6918cd63bcc7ab0702a4d2224ad26c294cf5969da98e778b45426a2226b5bf9c": {
+      "userId": "usr_1770779014948_7999",
+      "createdAt": "2026-02-11T03:54:33.792Z",
+      "expiresAt": 1773374073792
+    },
+    "7145cd9e80b9b06f10f8880ca39e5628061eddaf1bb106b3250a8e8d9b6936d2": {
+      "userId": "usr_1770778964203_6059",
+      "createdAt": "2026-02-11T03:54:36.155Z",
+      "expiresAt": 1773374076155
+    },
+    "7a74ef284db1f71ba54d44111d04e97cb32a24ae6b7bd73584d38f9d39e62efb": {
+      "userId": "usr_1770778869132_9007",
+      "createdAt": "2026-02-11T03:58:46.751Z",
+      "expiresAt": 1773374326751
+    },
+    "3438b62a6e5d8f3362ec28341f4255ec71868b8583cc595b89fa117dee142679": {
+      "userId": "usr_1770779014948_7999",
+      "createdAt": "2026-02-11T03:59:46.058Z",
+      "expiresAt": 1773374386058
     }
   }
 }

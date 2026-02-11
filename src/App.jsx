@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://192.168.1.62:3000";
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://10.15.14.126:3000";
+const SOCKET_OPTIONS = {
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 8000,
+  timeout: 10000,
+  transports: ["websocket", "polling"],
+};
 
 const buildGlobeMesh = (nodeCount = 520, maxEdges = 2600) => {
   const nodes = [];
@@ -71,6 +79,7 @@ function App() {
   const userSocketRef = useRef(null);
   const llmEngineRef = useRef(null);
   const llmLoadingRef = useRef(null);
+  const requestTimeoutRef = useRef(null);
 
   const [networkWorkers, setNetworkWorkers] = useState([]);
 
@@ -251,7 +260,7 @@ function App() {
       return undefined;
     }
 
-    const socket = io(SOCKET_URL);
+    const socket = io(SOCKET_URL, SOCKET_OPTIONS);
     workerSocketRef.current = socket;
 
     socket.on("connect", () => {
@@ -274,6 +283,11 @@ function App() {
       setWorkerConnected(false);
       setBrainState("disconnected");
       setWorkerReceivers([]);
+    });
+    socket.on("connect_error", (error) => {
+      setWorkerConnected(false);
+      setBrainState("disconnected");
+      setWorkerModelStatus(`Connection error: ${error?.message || "Socket connection failed"}`);
     });
 
     socket.on("network-status", (workers = []) => {
@@ -301,6 +315,8 @@ function App() {
           setTasksSolved((prev) => prev + 1);
           setBrainEarnings((prev) => Number((prev + 0.95).toFixed(2)));
           socket.emit("compute-result", {
+            jobId: payload.jobId,
+            chunkId: payload.chunkId ?? 0,
             result: { text, model: llmModelId },
             computeTimeMs: computeMs,
             from: payload.from,
@@ -308,6 +324,8 @@ function App() {
           });
         } catch (error) {
           socket.emit("compute-result", {
+            jobId: payload.jobId,
+            chunkId: payload.chunkId ?? 0,
             result: {
               text: `LLM generation failed: ${error?.message || "Unknown error"}`,
               model: llmModelId,
@@ -348,14 +366,30 @@ function App() {
   useEffect(() => {
     if (page !== "requestor") return undefined;
 
-    const socket = io(SOCKET_URL);
+    const socket = io(SOCKET_URL, SOCKET_OPTIONS);
     userSocketRef.current = socket;
 
     socket.on("connect", () => setRequestConnected(true));
     socket.on("disconnect", () => setRequestConnected(false));
+    socket.on("connect_error", (error) => {
+      setRequestConnected(false);
+      setRequestStatus(`Connection error: ${error?.message || "Unable to reach server"}`);
+    });
     socket.on("network-status", (workers = []) => setNetworkWorkers(workers));
 
     socket.on("job-status", (msg = {}) => {
+      if (msg.status === "Failed") {
+        if (requestTimeoutRef.current) {
+          clearTimeout(requestTimeoutRef.current);
+          requestTimeoutRef.current = null;
+        }
+        setRequestStatus(msg.msg || "Job failed.");
+        return;
+      }
+      if (msg.status === "Retrying") {
+        setRequestStatus(msg.msg || "Worker changed. Auto-retrying with active donors...");
+        return;
+      }
       if (msg.status === "Assigned") {
         setRequestStatus(msg.msg || `Assigned to Worker: ${String(msg.worker || "").slice(0, 6)}...`);
       } else {
@@ -364,6 +398,11 @@ function App() {
     });
 
     socket.on("job-finished", (result) => {
+      if (requestTimeoutRef.current) {
+        clearTimeout(requestTimeoutRef.current);
+        requestTimeoutRef.current = null;
+      }
+
       if (result && typeof result === "object" && "text" in result) {
         setRequestStatus("LLM response received.");
         setResultPreview(String(result.text || ""));
@@ -387,6 +426,10 @@ function App() {
     });
 
     return () => {
+      if (requestTimeoutRef.current) {
+        clearTimeout(requestTimeoutRef.current);
+        requestTimeoutRef.current = null;
+      }
       socket.disconnect();
       userSocketRef.current = null;
     };
@@ -395,7 +438,7 @@ function App() {
   useEffect(() => {
     if (page !== "server") return undefined;
 
-    const socket = io(SOCKET_URL);
+    const socket = io(SOCKET_URL, SOCKET_OPTIONS);
 
     socket.on("connect", () => {
       setAdminConnected(true);
@@ -403,6 +446,7 @@ function App() {
     });
 
     socket.on("disconnect", () => setAdminConnected(false));
+    socket.on("connect_error", () => setAdminConnected(false));
     socket.on("network-status", (workers = []) => setNetworkWorkers(workers));
     socket.on("admin-activity", (item) => {
       if (!item) return;
@@ -439,6 +483,13 @@ function App() {
 
     setRequestStatus(`Dispatching LLM prompt to room ${roomId}...`);
     setResultPreview("");
+    if (requestTimeoutRef.current) {
+      clearTimeout(requestTimeoutRef.current);
+    }
+    requestTimeoutRef.current = setTimeout(() => {
+      setRequestStatus("Request is taking longer than expected. Auto-retrying with active donors...");
+    }, 60000);
+
     socket.emit("request-matrix-job", {
       task: "LLM Generation",
       type: "llm_generate",

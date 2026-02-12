@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://10.15.14.126:3000";
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:3000";
 const SOCKET_OPTIONS = {
   reconnection: true,
   reconnectionAttempts: Infinity,
@@ -82,9 +82,11 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false);
 
   const workerSocketRef = useRef(null);
+  const activeWorkerTaskRef = useRef(null);
   const userSocketRef = useRef(null);
   const llmEngineRef = useRef(null);
   const llmLoadingRef = useRef(null);
+  const gpuInfoLoadingRef = useRef(null);
   const requestTimeoutRef = useRef(null);
   const authTokenRef = useRef("");
   const metricSamplesRef = useRef([]);
@@ -360,6 +362,39 @@ function App() {
     setGpuUtilization((prev) => Math.max(prev, safeValue));
   };
 
+  const detectWorkerGpuInfo = async () => {
+    if (gpuInfoLoadingRef.current) return gpuInfoLoadingRef.current;
+
+    gpuInfoLoadingRef.current = (async () => {
+      if (typeof navigator === "undefined" || !navigator.gpu) {
+        return { hasWebGPU: false, gpuName: "WebGPU Unavailable" };
+      }
+
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          return { hasWebGPU: false, gpuName: "No WebGPU Adapter" };
+        }
+
+        const info = adapter.info || {};
+        const parts = [
+          String(info.vendor || "").trim(),
+          String(info.architecture || "").trim(),
+          String(info.device || "").trim(),
+          String(info.description || "").trim(),
+        ].filter(Boolean);
+        const gpuName = parts.length ? parts.join(" | ") : "WebGPU Adapter (Detected)";
+        return { hasWebGPU: true, gpuName };
+      } catch {
+        return { hasWebGPU: Boolean(navigator.gpu), gpuName: "WebGPU Adapter (Access Limited)" };
+      }
+    })().finally(() => {
+      gpuInfoLoadingRef.current = null;
+    });
+
+    return gpuInfoLoadingRef.current;
+  };
+
   const ensureWorkerLLMEngine = async () => {
     if (llmEngineRef.current) return llmEngineRef.current;
     if (llmLoadingRef.current) return llmLoadingRef.current;
@@ -385,6 +420,28 @@ function App() {
     return llmLoadingRef.current;
   };
 
+  const resetWorkerLLMEngine = async () => {
+    const engine = llmEngineRef.current;
+    llmEngineRef.current = null;
+    llmLoadingRef.current = null;
+    if (!engine) return;
+    try {
+      if (typeof engine.interruptGenerate === "function") {
+        await engine.interruptGenerate();
+      }
+    } catch {
+      // ignore interruption errors
+    }
+    try {
+      if (typeof engine.unload === "function") {
+        await engine.unload();
+      }
+    } catch {
+      // ignore unload errors
+    }
+    setWorkerModelStatus("Model reset after cancellation. Reloading on next request...");
+  };
+
   const runWorkerLLMGenerate = async (payload) => {
     const prompt = String(payload.prompt || "").trim();
     const startedAt = performance.now();
@@ -396,6 +453,13 @@ function App() {
     }
 
     const engine = await ensureWorkerLLMEngine();
+    if (typeof engine.resetChat === "function") {
+      try {
+        await engine.resetChat();
+      } catch {
+        // ignore chat reset failures
+      }
+    }
     const maxTokens = Math.max(8, Number.parseInt(payload.maxTokens, 10) || 128);
     const temperature = Number.isFinite(Number(payload.temperature))
       ? Number(payload.temperature)
@@ -415,14 +479,16 @@ function App() {
       temperature,
     });
 
-    const text = response?.choices?.[0]?.message?.content || "";
+    const finishReason = response?.choices?.[0]?.finish_reason;
+    const rawText = response?.choices?.[0]?.message?.content;
+    const text = typeof rawText === "string" ? rawText : "";
     const endedAt = performance.now();
     const promptBytes = String(prompt).length;
     const responseBytes = String(text).length;
     const transferMs = Math.max(2, Math.round((promptBytes + responseBytes) / 140));
     const gpuLoad = Math.min(98, Math.max(45, Math.round(40 + Math.min(55, (endedAt - startedAt) / 380))));
     return {
-      text,
+      text: text || (finishReason === "abort" ? "Generation interrupted on donor." : "No text generated."),
       computeMs: Math.max(1, Math.round(endedAt - startedAt)),
       transferMs,
       gpuLoad,
@@ -496,17 +562,31 @@ function App() {
       setWorkerConnected(true);
       setWorkerId(socket.id);
       socket.emit("register-worker", {
-        hasWebGPU: true,
-        llmCapable: true,
-        gpuName: "WebGPU Adapter (Standard)",
+        hasWebGPU: typeof navigator !== "undefined" && Boolean(navigator.gpu),
+        llmCapable: false,
+        gpuName: "Detecting adapter...",
         roomId: workerRoomId,
         username: authUser?.username || "",
       });
       setBrainState("idle");
-      // Warm up model right after donor connects to reduce first-request latency.
-      ensureWorkerLLMEngine().catch((error) => {
-        setWorkerModelStatus(`Model preload failed: ${error?.message || "Unknown error"}`);
+      detectWorkerGpuInfo().then((gpuInfo) => {
+        if (socket.connected) {
+          socket.emit("update-worker-capability", gpuInfo);
+        }
       });
+      // Warm up model right after donor connects to reduce first-request latency.
+      ensureWorkerLLMEngine()
+        .then(() => {
+          if (socket.connected) {
+            socket.emit("update-worker-capability", { llmCapable: true });
+          }
+        })
+        .catch((error) => {
+          if (socket.connected) {
+            socket.emit("update-worker-capability", { llmCapable: false });
+          }
+          setWorkerModelStatus(`Model preload failed: ${error?.message || "Unknown error"}`);
+        });
     });
 
     socket.on("disconnect", () => {
@@ -531,6 +611,23 @@ function App() {
       setWorkerReceivers(Array.isArray(links) ? links : []);
     });
 
+    socket.on("cancel-compute-task", async ({ jobId, chunkId } = {}) => {
+      const currentTask = activeWorkerTaskRef.current;
+      if (!currentTask) return;
+      if (currentTask.jobId !== jobId) return;
+      if (Number(currentTask.chunkId ?? 0) !== Number(chunkId ?? 0)) return;
+
+      currentTask.cancelRequested = true;
+      if (currentTask.isLLMTask && llmEngineRef.current) {
+        try {
+          await llmEngineRef.current.interruptGenerate();
+        } catch {
+          // ignore interruption errors
+        }
+        await resetWorkerLLMEngine();
+      }
+    });
+
     socket.on("compute-task", async (payload = {}) => {
       setBrainState("computing");
 
@@ -538,10 +635,20 @@ function App() {
         payload.type === "llm_generate" ||
         payload.taskType === "llm_generate" ||
         typeof payload.prompt === "string";
+      const taskControl = {
+        jobId: payload.jobId,
+        chunkId: payload.chunkId ?? 0,
+        isLLMTask,
+        cancelRequested: false,
+      };
+      activeWorkerTaskRef.current = taskControl;
 
       if (isLLMTask) {
         try {
           const { text, computeMs, transferMs, gpuLoad } = await runWorkerLLMGenerate(payload);
+          if (taskControl.cancelRequested) {
+            return;
+          }
           recordTaskMetrics({ computeMs, transferMs, gpuLoad });
           creditBrainEarnings(0.95);
           socket.emit("compute-result", {
@@ -553,6 +660,9 @@ function App() {
             taskType: "llm_generate",
           });
         } catch (error) {
+          if (taskControl.cancelRequested) {
+            return;
+          }
           socket.emit("compute-result", {
             jobId: payload.jobId,
             chunkId: payload.chunkId ?? 0,
@@ -565,12 +675,22 @@ function App() {
             taskType: "llm_generate",
           });
         } finally {
+          if (activeWorkerTaskRef.current === taskControl) {
+            activeWorkerTaskRef.current = null;
+          }
           setTimeout(() => setBrainState("idle"), 300);
         }
         return;
       }
 
       const { result, computeMs, transferMs, gpuLoad } = runWorkerCompute(payload);
+      if (taskControl.cancelRequested) {
+        if (activeWorkerTaskRef.current === taskControl) {
+          activeWorkerTaskRef.current = null;
+        }
+        setTimeout(() => setBrainState("idle"), 300);
+        return;
+      }
       recordTaskMetrics({ computeMs, transferMs, gpuLoad });
       creditBrainEarnings(0.42);
 
@@ -581,10 +701,14 @@ function App() {
         computeTimeMs: computeMs,
         from: payload.from,
       });
+      if (activeWorkerTaskRef.current === taskControl) {
+        activeWorkerTaskRef.current = null;
+      }
       setTimeout(() => setBrainState("idle"), 300);
     });
 
     return () => {
+      activeWorkerTaskRef.current = null;
       socket.disconnect();
       workerSocketRef.current = null;
     };
@@ -644,6 +768,16 @@ function App() {
         setRequestLoading(false);
         setRequestAssignedDonor("");
         setRequestStatus(msg.msg || "Job failed.");
+        return;
+      }
+      if (msg.status === "Cancelled") {
+        if (requestTimeoutRef.current) {
+          clearTimeout(requestTimeoutRef.current);
+          requestTimeoutRef.current = null;
+        }
+        setRequestLoading(false);
+        setRequestAssignedDonor("");
+        setRequestStatus(msg.msg || "Generation stopped.");
         return;
       }
       if (msg.status === "Retrying") {
@@ -763,7 +897,7 @@ function App() {
     }
     requestTimeoutRef.current = setTimeout(() => {
       setRequestStatus("Request is taking longer than expected. Auto-retrying with active donors...");
-    }, 60000);
+    }, 240000);
 
     socket.emit("request-matrix-job", {
       task: "LLM Generation",
@@ -775,6 +909,24 @@ function App() {
       modelId: llmModelId,
       preferredWorkerId: requestTargetType === "public" ? requestPreferredDonorId : "",
     });
+  };
+
+  const stopRequestTask = () => {
+    const socket = userSocketRef.current;
+    if (!socket || !socket.connected) {
+      setRequestLoading(false);
+      setRequestStatus("Not connected to server.");
+      return;
+    }
+
+    if (requestTimeoutRef.current) {
+      clearTimeout(requestTimeoutRef.current);
+      requestTimeoutRef.current = null;
+    }
+    setRequestLoading(false);
+    setRequestAssignedDonor("");
+    setRequestStatus("Stopping generation...");
+    socket.emit("cancel-request-jobs");
   };
 
   const efficiencyPercent = useMemo(() => {
@@ -792,7 +944,7 @@ function App() {
     const roomCounts = new Map();
     networkWorkers.forEach((w) => {
       const room = w.roomId || "public";
-      if (w.status === "idle" && room === "public") {
+      if (w.status === "idle" && room === "public" && w.llmCapable) {
         roomCounts.set(room, (roomCounts.get(room) || 0) + 1);
       }
     });
@@ -800,7 +952,11 @@ function App() {
   }, [networkWorkers]);
 
   const idlePublicDonors = useMemo(() => (
-    networkWorkers.filter((w) => w.status === "idle" && (w.roomId || "public") === "public")
+    networkWorkers.filter((w) => (
+      w.status === "idle" &&
+      (w.roomId || "public") === "public" &&
+      w.llmCapable
+    ))
   ), [networkWorkers]);
 
   useEffect(() => {
@@ -818,6 +974,10 @@ function App() {
   }, [requestTargetType]);
 
   const getSafeRoomLabel = (roomId) => (String(roomId || "public") === "public" ? "public" : "private");
+  const currentWorkerGpuName = useMemo(() => {
+    const worker = networkWorkers.find((w) => w.id === workerId);
+    return worker?.gpuName || "Detecting adapter...";
+  }, [networkWorkers, workerId]);
 
   if (page === "donator") {
     return (
@@ -829,6 +989,7 @@ function App() {
             <h3>Live Performance Metrics</h3>
             <p className="socket-state">{workerConnected ? "Connected" : "Disconnected"} to {SOCKET_URL}</p>
             <p className="socket-state">{workerModelStatus}</p>
+            <p className="socket-state">Detected GPU: {currentWorkerGpuName}</p>
 
             <div className="room-config">
               <label className="mini-label">Room Mode</label>
@@ -1133,7 +1294,10 @@ function App() {
             disabled={requestTargetType === "private"}
           />
 
-          <button type="button" onClick={launchRequestTask}>Generate Response</button>
+          <button type="button" onClick={launchRequestTask} disabled={requestLoading}>Generate Response</button>
+          {requestLoading ? (
+            <button type="button" className="small-btn" onClick={stopRequestTask}>Stop Generation</button>
+          ) : null}
           {requestLoading ? (
             <div className="request-loading-row">
               <span className="request-spinner" aria-hidden="true" />

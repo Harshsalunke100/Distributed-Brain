@@ -7,7 +7,7 @@ const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
-const CHUNK_TIMEOUT_MS = Number(process.env.CHUNK_TIMEOUT_MS || 45000);
+const CHUNK_TIMEOUT_MS = Number(process.env.CHUNK_TIMEOUT_MS || 180000);
 const MAX_CHUNK_RETRIES = Number(process.env.MAX_CHUNK_RETRIES || 2);
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 24 * 30);
 const AUTH_STORE_PATH = path.join(__dirname, "data", "auth-store.json");
@@ -611,7 +611,10 @@ function dispatchPendingChunks(jobId) {
     if (!idleWorkers.length) {
       io.to(job.fromSocket).emit("job-status", {
         status: "Queued",
-        msg: `Waiting for available workers in Room: ${job.roomId}`,
+        msg:
+          job.jobType === "llm_generate"
+            ? `Waiting for LLM-ready workers in Room: ${job.roomId}`
+            : `Waiting for available workers in Room: ${job.roomId}`,
       });
       continue;
     }
@@ -688,6 +691,28 @@ io.on("connection", (socket) => {
     console.log(`Worker Joined Room [${roomId}]: ${gpuName} (${socket.id})`);
     broadcastNetworkStatus();
     broadcastClientStats();
+  });
+
+  socket.on("update-worker-capability", (payload = {}) => {
+    const worker = workers.get(socket.id);
+    if (!worker) return;
+
+    if (Object.prototype.hasOwnProperty.call(payload, "llmCapable")) {
+      worker.llmCapable = Boolean(payload.llmCapable);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "hasWebGPU")) {
+      worker.hasWebGPU = Boolean(payload.hasWebGPU);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "gpuName")) {
+      const gpuName = String(payload.gpuName || "").trim();
+      if (gpuName) {
+        worker.gpuName = gpuName;
+      }
+    }
+
+    workers.set(socket.id, worker);
+    dispatchAllPendingJobs();
+    broadcastNetworkStatus();
   });
 
   socket.on("disconnect", () => {
@@ -815,6 +840,43 @@ io.on("connection", (socket) => {
     socket.emit("job-status", {
       status: "Assigned",
       msg: `Distributed to ${matrixChunks.length} worker nodes with retries enabled.`,
+    });
+  });
+
+  socket.on("cancel-request-jobs", () => {
+    const jobIds = [];
+    for (const [jobId, job] of activeJobs.entries()) {
+      if (job.fromSocket === socket.id) {
+        jobIds.push(jobId);
+      }
+    }
+
+    if (!jobIds.length) {
+      socket.emit("job-status", {
+        status: "Cancelled",
+        msg: "No active jobs to cancel.",
+      });
+      return;
+    }
+
+    for (const jobId of jobIds) {
+      const job = activeJobs.get(jobId);
+      if (job) {
+        for (const chunk of job.chunks) {
+          if (!chunk?.assignedWorkerId) continue;
+          io.to(chunk.assignedWorkerId).emit("cancel-compute-task", {
+            jobId,
+            chunkId: chunk.chunkId,
+          });
+        }
+      }
+      finalizeJob(jobId, "cancelled by requestor");
+    }
+    dispatchAllPendingJobs();
+
+    socket.emit("job-status", {
+      status: "Cancelled",
+      msg: `Stopped ${jobIds.length} active job${jobIds.length > 1 ? "s" : ""}.`,
     });
   });
 
